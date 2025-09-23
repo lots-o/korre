@@ -5,14 +5,14 @@
 
 BERT pretrained model로는 [KR-BERT-MEDIUM](https://github.com/snunlp/KR-BERT-MEDIUM)을 활용하였습니다. 
 
+## Update 
+- 기존 모델을 허깅페이스 트랜스포머 모델로 쉽게 임포트 할수 있도록 포팅: [lots-o/kre-bert](https://huggingface.co/lots-o/kre-bert)
 
 ## Installation
-- `korre` 는 `python>=3.8` 환경을 필요로 합니다.
-- 다음과 같이 모듈을 설치하고 추가적으로 필요한 라이브러리를 설치합니다.
 ```console
 git clone https://github.com/datawhales/korre.git
 cd korre
-pip install -r requirements.txt
+uv sync
 ```
 
 ## Quick Start
@@ -31,28 +31,43 @@ pip install -r requirements.txt
 ## Named Entity Recognition
 문장 내에 내포되어 있는 관계를 추출하기 위해 개체명 인식이 필요합니다. 
 
-한국어 개체명 인식 모듈로는 `pororo`(https://github.com/kakaobrain/pororo) 모듈을 그대로 사용하였고 `korre`에서는 다음과 같이 사용 가능합니다.
+한국어 개체명 인식 모듈로는 [lots-o/gliner-bi-ko-xlarge-v1](https://huggingface.co/lots-o/gliner-bi-ko-xlarge-v1) 모듈로 변경하였고, `korre`에서는 다음과 같이 사용 가능합니다.
 ```python
->>> korre.pororo_ner('갤럭시 플립2는 삼성에서 만든 스마트폰이다.')
-[('갤럭시 플립2', 'ARTIFACT'),
- ('는', 'O'),
- (' ', 'O'),
- ('삼성', 'ORGANIZATION'),
- ('에서', 'O'),
- (' ', 'O'),
- ('만든', 'O'),
- (' ', 'O'),
- ('스마트폰', 'TERM'),
- ('이다.', 'O')]
+>>> korre.gliner_ner('갤럭시 플립2는 삼성에서 만든 스마트폰이다.')
+[
+    {
+        "start": 0,
+        "end": 7,
+        "text": "갤럭시 플립2",
+        "label": "인공물_기타 상품",
+        "score": 0.9981818199157715
+    },
+    {
+        "start": 9,
+        "end": 11,
+        "text": "삼성",
+        "label": "기관_경제",
+        "score": 0.9981903433799744
+    },
+    {
+        "start": 17,
+        "end": 21,
+        "text": "스마트폰",
+        "label": "용어_IT 하드웨어",
+        "score": 0.9990777969360352
+    }
+]
 ```
-`pororo` 모듈을 통해 개체명 인식을 수행한 후 관계를 추출하기 위한 개체를 추출하여 다음과 같이 문장에서의 인덱스를 함께 나타낼 수 있습니다.
+개체명 인식을 수행한 후 관계를 추출하기 위한 개체를 추출하여 다음과 같이 문장에서의 인덱스를 함께 나타낼 수 있습니다.
 
 이를 통해 관계를 추출하고자 하는 개체의 인덱스를 입력에 사용하여 관계 추출에 사용하게 됩니다.
 ```python
 >>> korre.ner('갤럭시 플립2는 삼성에서 만든 스마트폰이다.')
-[('갤럭시 플립2', 'ARTIFACT', [0, 7]),
- ('삼성', 'ORGANIZATION', [9, 11]),
- ('스마트폰', 'TERM', [17, 21])]
+[
+    ('갤럭시 플립2', '인공물_기타 상품', [0, 7]), 
+    ('삼성', '기관_경제', [9, 11]), 
+    ('스마트폰', '용어_IT 하드웨어', [17, 21])
+]
 ```
 
 ## Inference (Relation Extraction)

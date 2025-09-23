@@ -1,7 +1,7 @@
 import os
 import torch
-import numpy as np
 import easydict
+from typing import List
 from pathlib import Path
 from itertools import permutations
 
@@ -32,21 +32,24 @@ class KorRE:
                 "n_class": 97,
                 "max_token_len": 512,
                 "max_acc_threshold": 0.6,
+                "re_batch_size": 64,  # RE 추론 배치 크기
+                "ner_threshold": 0.5,  # GLiNER ner 임계 값
             }
         )
         # device
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.use_cuda = torch.cuda.is_available() and self.device.type == "cuda"
 
         want_dtype = torch.float32
         self.ner_module = GLiNER.from_pretrained(self.args.ner_model, torch_dtype=want_dtype)
-        self.ner_module.to(self.device, dtype=want_dtype)
+        self.ner_module.to(self.device, dtype=want_dtype, non_blocking=self.use_cuda)
         self.ner_module.eval()
 
         logging.set_verbosity_error()
 
         self.tokenizer = AutoTokenizer.from_pretrained(self.args.bert_model)
         self.trained_model = AutoModel.from_pretrained(self.args.bert_model, trust_remote_code=True)
-        self.trained_model.to(self.device)
+        self.trained_model.to(self.device, non_blocking=self.use_cuda)
         self.trained_model.eval()
 
         # relation id to label
@@ -81,7 +84,9 @@ class KorRE:
 
     def gliner_ner(self, sentence: str):
         """gliner의 ner 모듈을 이용하여 그대로 반환하는 함수."""
-        return self.ner_module.predict_with_embeds(sentence, labels_embeddings=self.entity_embeddings, labels=self.entity_label, threshold=0.5)
+        return self.ner_module.predict_with_embeds(
+            sentence, labels_embeddings=self.entity_embeddings, labels=self.entity_label, threshold=float(self.args.ner_threshold)
+        )
 
     def ner(self, sentence: str):
         """주어진 문장에서 gliner의 ner 모듈을 이용하여 개체명 인식을 수행하고 각 개체의 인덱스 위치를 함께 반환하는 함수."""
@@ -175,172 +180,117 @@ class KorRE:
         obj_range=None,
         entity_markers_included=False,
     ):
-        """입력받은 문장에 대해 관계 추출 태스크를 수행하는 함수."""
+        """입력받은 문장에 대해 관계 추출 태스크를 수행하는 함수.
+        - 불필요한 그래프 생성을 막기 위해 inference_mode 사용
+        - 다수의 (문장, 엔티티쌍) 케이스는 배치 인코딩/추론으로 GPU 메모리 사용을 최소화
+        """
         e1_s, e1_e, e2_s, e2_e = self.trained_model.config.marker_ids
+        threshold = float(self.args.max_acc_threshold)
 
-        # entity marker token이 포함된 경우
+        # ---------------------------
+        # Helper: 배치 추론
+        # ---------------------------
+        def _predict_probs_batch(text_list: List[str]):
+            """문장 리스트를 한 번에 토크나이즈/전달하여 [B, num_labels] 확률 텐서(CPU)를 반환"""
+            if not text_list:
+                return torch.empty(0, self.args.n_class)
+
+            enc = self.tokenizer(
+                text_list,
+                add_special_tokens=True,
+                max_length=self.args.max_token_len,
+                padding=True,
+                truncation=True,
+                return_attention_mask=True,
+                return_tensors="pt",
+            )
+            with torch.inference_mode():
+                input_ids = enc["input_ids"].to(self.device, non_blocking=self.use_cuda)
+                mask = enc["attention_mask"].to(self.device, non_blocking=self.use_cuda)
+                out = self.trained_model(input_ids, mask)
+
+                # 모델은 {"probs": [B, n_class]}를 반환 ( 확률)
+                probs = out["probs"]
+
+                # 바로 임계값 적용 후 CPU로 이동 (GPU 메모리 즉시 릴리즈를 위해)
+                binarized = (probs >= threshold).to(torch.uint8).cpu()
+
+            # 임시 텐서 정리
+            del enc, input_ids, mask, out, probs
+            if torch.cuda.is_available() and self.device.type == "cuda":
+                torch.cuda.empty_cache()
+            return binarized
+
+        # ---------------------------
+        # 1) 엔티티 마커가 포함된 경우 = (entity_markers_included=True)
+        # ---------------------------
         if entity_markers_included:
-            # subj, obj name 구하기
+            # subj, obj name 구하기 (마커 사이 span 디코딩)
             tmp_input_ids = self.tokenizer(sentence)["input_ids"]
-
             if tmp_input_ids.count(e1_s) != 1 or tmp_input_ids.count(e1_e) != 1 or tmp_input_ids.count(e2_s) != 1 or tmp_input_ids.count(e2_e) != 1:
                 raise Exception("Incorrect number of entity marker tokens.")
 
             subj_start_id, subj_end_id = tmp_input_ids.index(e1_s), tmp_input_ids.index(e1_e)
             obj_start_id, obj_end_id = tmp_input_ids.index(e2_s), tmp_input_ids.index(e2_e)
-
             subj_name = self.tokenizer.decode(tmp_input_ids[subj_start_id + 1 : subj_end_id])
             obj_name = self.tokenizer.decode(tmp_input_ids[obj_start_id + 1 : obj_end_id])
 
-            encoding = self.tokenizer.encode_plus(
-                sentence,
-                add_special_tokens=True,
-                max_length=self.args.max_token_len,
-                return_token_type_ids=False,
-                padding="max_length",
-                truncation=True,
-                return_attention_mask=True,
-                return_tensors="pt",
-            )
+            # 단일 문장 배치 추론
+            preds_bin = _predict_probs_batch([sentence])  # [1, n_class] (CPU, uint8)
+            active_idx = torch.nonzero(preds_bin[0]).flatten().tolist()
+            pred_rel_ids = self.__idx2relid(active_idx)
+            return [(subj_name, obj_name, self.relid2label[p]) for p in pred_rel_ids]
 
-            input_ids = encoding["input_ids"].to(self.device)
-            mask = encoding["attention_mask"].to(self.device)
+        # ---------------------------
+        # 2) 엔티티 마커가 포함되지 않은 경우 (entity_markers_included=False)
+        # ---------------------------
+        # NOTE: 엔티티 마커가 이미 포함된 경우 예외
+        tmp_input_ids = self.tokenizer(sentence)["input_ids"]
+        if tmp_input_ids.count(e1_s) >= 1 or tmp_input_ids.count(e1_e) >= 1 or tmp_input_ids.count(e2_s) >= 1 or tmp_input_ids.count(e2_e) >= 1:
+            raise Exception("Entity marker tokens already exist in the input sentence. Try 'entity_markers_included=True'.")
 
-            prediction = self.trained_model(input_ids, mask)["probs"]
+        # 2-a) (subj_range, obj_range) 가 주어진 경우: 단일 케이스만 처리
+        if subj_range is not None and obj_range is not None:
+            converted_sent = self.entity_markers_added(sentence, subj_range, obj_range)
+            preds_bin = _predict_probs_batch([converted_sent])  # [1, n_class]
+            active_idx = torch.nonzero(preds_bin[0]).flatten().tolist()
+            pred_rel_ids = self.__idx2relid(active_idx)
+            pred_rel_list = [self.relid2label[p] for p in pred_rel_ids]
+            subj_text = sentence[subj_range[0] : subj_range[1]]
+            obj_text = sentence[obj_range[0] : obj_range[1]]
+            return [(subj_text, obj_text, rel) for rel in pred_rel_list]
 
-            predictions = [prediction.flatten()]
-            predictions = torch.stack(predictions).detach().cpu()
+        # 2-b) 문장만 주어진 경우: 가능한 모든 엔티티쌍에 대해 배치 처리
+        input_list = self.get_all_inputs(sentence)  # [[sent, e1_range, e2_range], ...]
+        if not input_list:
+            return []
 
-            y_pred = predictions.numpy()
-            upper, lower = 1, 0
-            y_pred = np.where(y_pred > self.args.max_acc_threshold, upper, lower)
+        # 엔티티 마커 삽입을 모두 미리 수행
+        converted_sent_list = [self.entity_markers_added(*inp) for inp in input_list]
 
-            preds_list = []
+        # 배치 추론 (긴 목록은 chunk로 나눠 처리)
+        BATCH = int(self.args.re_batch_size)
+        all_bins = []
+        for i in range(0, len(converted_sent_list), BATCH):
+            chunk = converted_sent_list[i : i + BATCH]
+            preds_bin = _predict_probs_batch(chunk)  # [len(chunk), n_class]
+            all_bins.append(preds_bin)
+        if not all_bins:
+            return []
+        preds_bin_all = torch.cat(all_bins, dim=0)  # [N, n_class] (CPU)
 
-            for i in range(len(y_pred)):
-                class_pred = self.__idx2relid(np.where(y_pred[i] == 1)[0])
-                preds_list.append(class_pred)
+        # 각 케이스별로 활성 라벨을 수집
+        result = []
+        for row_i in range(preds_bin_all.size(0)):
+            idxs = torch.nonzero(preds_bin_all[row_i]).flatten().tolist()
+            rel_ids = self.__idx2relid(idxs)
+            subj_range_i, obj_range_i = input_list[row_i][1], input_list[row_i][2]
+            subj_text = sentence[subj_range_i[0] : subj_range_i[1]]
+            obj_text = sentence[obj_range_i[0] : obj_range_i[1]]
+            for rid in rel_ids:
+                result.append((subj_text, obj_text, self.relid2label[rid]))
 
-            preds_list = preds_list[0]
-
-            pred_rel_list = [self.relid2label[pred] for pred in preds_list]
-
-            return [(subj_name, obj_name, pred_rel) for pred_rel in pred_rel_list]
-
-        # entity_markers_included=False인 경우
-        else:
-            # entity marker가 문장에 포함된 경우
-            tmp_input_ids = self.tokenizer(sentence)["input_ids"]
-            if tmp_input_ids.count(e1_s) >= 1 or tmp_input_ids.count(e1_e) >= 1 or tmp_input_ids.count(e2_s) >= 1 or tmp_input_ids.count(e2_e) >= 1:
-                raise Exception("Entity marker tokens already exist in the input sentence. Try 'entity_markers_included=True'.")
-
-            # subj range와 obj range가 주어진 경우
-            if subj_range is not None and obj_range is not None:
-                # add entity markers
-                converted_sent = self.entity_markers_added(sentence, subj_range, obj_range)
-
-                encoding = self.tokenizer.encode_plus(
-                    converted_sent,
-                    add_special_tokens=True,
-                    max_length=self.args.max_token_len,
-                    return_token_type_ids=False,
-                    padding="max_length",
-                    truncation=True,
-                    return_attention_mask=True,
-                    return_tensors="pt",
-                )
-
-                input_ids = encoding["input_ids"].to(self.device)
-                mask = encoding["attention_mask"].to(self.device)
-
-                prediction = self.trained_model(input_ids, mask)["probs"]
-
-                predictions = [prediction.flatten()]
-                predictions = torch.stack(predictions).detach().cpu()
-
-                y_pred = predictions.numpy()
-                upper, lower = 1, 0
-                y_pred = np.where(y_pred > self.args.max_acc_threshold, upper, lower)
-
-                preds_list = []
-
-                for i in range(len(y_pred)):
-                    class_pred = self.__idx2relid(np.where(y_pred[i] == 1)[0])
-                    preds_list.append(class_pred)
-
-                preds_list = preds_list[0]
-
-                pred_rel_list = [self.relid2label[pred] for pred in preds_list]
-
-                return [
-                    (
-                        sentence[subj_range[0] : subj_range[1]],
-                        sentence[obj_range[0] : obj_range[1]],
-                        pred_rel,
-                    )
-                    for pred_rel in pred_rel_list
-                ]
-
-            # 문장만 주어진 경우: 모든 경우에 대해 inference 수행
-            else:
-                input_list = self.get_all_inputs(sentence)
-
-                converted_sent_list = [self.entity_markers_added(*input_list[i]) for i in range(len(input_list))]
-
-                encoding_list = []
-
-                for i, converted_sent in enumerate(converted_sent_list):
-                    tmp_encoding = self.tokenizer.encode_plus(
-                        converted_sent,
-                        add_special_tokens=True,
-                        max_length=self.args.max_token_len,
-                        return_token_type_ids=False,
-                        padding="max_length",
-                        truncation=True,
-                        return_attention_mask=True,
-                        return_tensors="pt",
-                    )
-                    encoding_list.append(tmp_encoding)
-
-                predictions = []
-
-                for i, item in enumerate(encoding_list):
-                    prediction = self.trained_model(
-                        item["input_ids"].to(self.device),
-                        item["attention_mask"].to(self.device),
-                    )["probs"]
-
-                    predictions.append(prediction.flatten())
-
-                if predictions:
-                    predictions = torch.stack(predictions).detach().cpu()
-
-                    y_pred = predictions.numpy()
-                    upper, lower = 1, 0
-                    y_pred = np.where(y_pred > self.args.max_acc_threshold, upper, lower)
-
-                    preds_list = []
-                    for i in range(len(y_pred)):
-                        class_pred = self.__idx2relid(np.where(y_pred[i] == 1)[0])
-                        preds_list.append(class_pred)
-
-                    result_list = []
-                    for i, input_i in enumerate(input_list):
-                        tmp_subj_range, tmp_obj_range = input_i[1], input_i[2]
-                        result_list.append(
-                            (
-                                sentence[tmp_subj_range[0] : tmp_subj_range[1]],
-                                sentence[tmp_obj_range[0] : tmp_obj_range[1]],
-                                preds_list[i],
-                            )
-                        )
-
-                    final_list = []
-                    for tmp_subj, tmp_obj, tmp_list in result_list:
-                        for i in range(len(tmp_list)):
-                            final_list.append((tmp_subj, tmp_obj, tmp_list[i]))
-
-                    return [(item[0], item[1], self.relid2label[item[2]]) for item in final_list]
-
-                else:
-                    return []
+        # 중복 제거
+        if result:
+            result = list(dict.fromkeys(result))
+        return result

@@ -1,1 +1,1 @@
-from korre.korre import KorRE
+from .korre import KorRE

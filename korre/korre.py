@@ -22,7 +22,12 @@ base_path = Path(__file__).resolve().parent
 
 
 class KorRE:
-    def __init__(self):
+    def __init__(self, cache_dir: str = None):
+        if cache_dir is None:
+            cache_dir = base_path / "hf_cache"
+        self.cache_dir = str(cache_dir)
+        os.makedirs(self.cache_dir, exist_ok=True)
+
         self.args = easydict.EasyDict(
             {
                 "bert_model": "lots-o/kre-bert",
@@ -42,14 +47,14 @@ class KorRE:
         self.use_cuda = torch.cuda.is_available() and self.device.type == "cuda"
 
         want_dtype = torch.float32
-        self.ner_module = GLiNER.from_pretrained(self.args.ner_model, torch_dtype=want_dtype)
+        self.ner_module = GLiNER.from_pretrained(self.args.ner_model, torch_dtype=want_dtype, cache_dir=self.cache_dir)
         self.ner_module.to(self.device, dtype=want_dtype, non_blocking=self.use_cuda)
         self.ner_module.eval()
 
         logging.set_verbosity_error()
 
-        self.tokenizer = AutoTokenizer.from_pretrained(self.args.bert_model)
-        self.trained_model = AutoModel.from_pretrained(self.args.bert_model, trust_remote_code=True)
+        self.tokenizer = AutoTokenizer.from_pretrained(self.args.bert_model, cache_dir=self.cache_dir)
+        self.trained_model = AutoModel.from_pretrained(self.args.bert_model, trust_remote_code=True, cache_dir=self.cache_dir)
         self.trained_model.to(self.device, non_blocking=self.use_cuda)
         self.trained_model.eval()
 

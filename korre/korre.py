@@ -1,6 +1,5 @@
 import os
-import torch
-import easydict
+import hashlib
 from typing import List
 from pathlib import Path
 from itertools import permutations
@@ -10,6 +9,8 @@ import warnings
 
 warnings.filterwarnings("ignore")
 
+import torch
+import easydict
 from gliner import GLiNER
 from transformers import AutoTokenizer, AutoModel
 from transformers import logging
@@ -63,9 +64,43 @@ class KorRE:
         # relation list
         self.relation_list = list(self.relid2label.keys())
 
-        # Pre-encode entity labels for faster NER inference.
-        self.entity_embeddings = self.ner_module.encode_labels(self.entity_label, batch_size=8)
-        self.entity_embeddings = self.entity_embeddings.to(device=self.device, dtype=want_dtype)
+        # Pre-encode entity labels for faster NER inference with on-disk cache
+        # 캐시 디렉토리 준비
+        self.cache_dir = base_path / "cache"
+        self.cache_dir.mkdir(exist_ok=True)
+
+        # 캐시 키 & 경로
+        cache_key = self._make_label_cache_key(self.entity_label, self.args.ner_model, want_dtype)
+        cache_path = self.cache_dir / f"gliner_label_embeds_{cache_key}.pt"
+
+        if cache_path.exists():
+            cached = torch.load(cache_path, map_location="cpu")
+            if isinstance(cached, torch.Tensor):
+                print(f"[KorRE] Loading cached GLiNER label embeddings from: {cache_path}")
+                self.entity_embeddings = cached.to(device=self.device, dtype=want_dtype, non_blocking=self.use_cuda)
+            else:
+                # 텐서가 아니면 재생성
+                print(f"[KorRE] Invalid cache file at {cache_path}. Regenerating...")
+                self.entity_embeddings = self.ner_module.encode_labels(self.entity_label, batch_size=8)
+                self.entity_embeddings = self.entity_embeddings.to(device=self.device, dtype=want_dtype, non_blocking=self.use_cuda)
+                torch.save(self.entity_embeddings.to("cpu"), cache_path)
+                print(f"[KorRE] Saved regenerated embeddings to: {cache_path}")
+        else:
+            # 최초 첫 저장
+            print(f"[KorRE] GLiNER label embeddings cache not found. Generating...")
+            self.entity_embeddings = self.ner_module.encode_labels(self.entity_label, batch_size=8)
+            self.entity_embeddings = self.entity_embeddings.to(device=self.device, dtype=want_dtype, non_blocking=self.use_cuda)
+            torch.save(self.entity_embeddings.to("cpu"), cache_path)
+            print(f"[KorRE] Saved new embeddings to: {cache_path}")
+
+    def _make_label_cache_key(self, labels: List[str], ner_model: str, dtype: torch.dtype) -> str:
+        """labels + ner_model + dtype을 묶어서 캐시 키 생성"""
+        h = hashlib.sha256()
+        h.update(ner_model.encode("utf-8"))
+        h.update(str(dtype).encode("utf-8"))
+        for lab in sorted(labels):
+            h.update(lab.encode("utf-8"))
+        return h.hexdigest()[:16]
 
     def __idx2relid(self, idx_list):
         """onehot label에서 1인 위치 인덱스 리스트를 relation id 리스트로 변환하는 함수.

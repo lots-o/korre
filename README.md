@@ -1,4 +1,11 @@
 # KORean Relation Extraction (korre)
+
+> **Note**
+>
+> 이 프로젝트는 [datawhales/korre](https://github.com/datawhales/korre) 프로젝트를 포크하여 수정한 버전입니다.
+>
+> 주요 변경 사항은 GLiNER 모델을 [lots-o/gliner-bi-ko-xlarge-v1](https://huggingface.co/lots-o/gliner-bi-ko-xlarge-v1)로 교체 및 코드 수정하였습니다. 
+
 한국어 문장 내에 존재하는 개체 사이의 관계를 추출하는 모듈입니다.
 
 한국어 기반의 관계 추출 모델을 학습하기 위해 한국어를 기반으로 사전학습된 BERT 모델을 이용하였습니다.
@@ -10,7 +17,7 @@ BERT pretrained model로는 [KR-BERT-MEDIUM](https://github.com/snunlp/KR-BERT-M
 
 ## Installation
 ```console
-git clone https://github.com/datawhales/korre.git
+git clone -b feat/custom https://github.com/lots-o/korre.git
 cd korre
 uv sync
 ```

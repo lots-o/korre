@@ -1,8 +1,8 @@
 import os
 import hashlib
 from typing import List
-from pathlib import Path
 from itertools import permutations
+from importlib import resources
 
 
 import warnings
@@ -18,13 +18,13 @@ from transformers import logging
 from .utils import load_any_json
 
 
-base_path = Path(__file__).resolve().parent
-
-
 class KorRE:
     def __init__(self, cache_dir: str = None):
+        # 패키지 데이터 파일 경로 설정 (importlib.resources 사용)
+        pkg_files = resources.files("korre")
+
         if cache_dir is None:
-            cache_dir = base_path / "hf_cache"
+            cache_dir = pkg_files / "hf_cache"
         self.cache_dir = str(cache_dir)
         os.makedirs(self.cache_dir, exist_ok=True)
 
@@ -32,8 +32,8 @@ class KorRE:
             {
                 "bert_model": "lots-o/kre-bert",
                 "ner_model": "lots-o/gliner-bi-ko-xlarge-v1",
-                "entity_label": os.path.join(base_path, "entity_label.json"),
-                "relid2label": os.path.join(base_path, "relid2label.json"),
+                "entity_label": pkg_files / "entity_label.json",
+                "relid2label": pkg_files / "relid2label.json",
                 "mode": "ALLCC",
                 "n_class": 97,
                 "max_token_len": 512,
@@ -71,7 +71,7 @@ class KorRE:
 
         # Pre-encode entity labels for faster NER inference with on-disk cache
         # 캐시 디렉토리 준비
-        self.cache_dir = base_path / "cache"
+        self.cache_dir = pkg_files / "cache"
         self.cache_dir.mkdir(exist_ok=True)
 
         # 캐시 키 & 경로

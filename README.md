@@ -14,13 +14,17 @@ BERT pretrained model로는 [KR-BERT-MEDIUM](https://github.com/snunlp/KR-BERT-M
 
 ## Update 
 - 기존 모델을 허깅페이스 트랜스포머 모델로 쉽게 임포트 할수 있도록 포팅: [lots-o/kre-bert](https://huggingface.co/lots-o/kre-bert)
+- NER 모델을 [lots-o/gliner-bi-ko-xlarge-v1](https://huggingface.co/lots-o/gliner-bi-ko-xlarge-v1)로 교체
 
 ## Installation
+PyPI를 통해 간단하게 설치할 수 있습니다.
 ```console
-git clone -b feat/custom https://github.com/lots-o/korre.git
-cd korre
-uv sync
+pip install gliner-korre
 ```
+또는 Git 저장소에서 직접 최신 버전을 설치할 수도 있습니다.
+```console
+pip install git+https://github.com/lots-o/korre.git@feat/custom
+
 
 ## Quick Start
 먼저 `korre` 패키지를 다음과 같이 import 합니다.

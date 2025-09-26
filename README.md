@@ -24,7 +24,7 @@ pip install gliner-korre
 또는 Git 저장소에서 직접 최신 버전을 설치할 수도 있습니다.
 ```console
 pip install git+https://github.com/lots-o/korre.git@feat/custom
-
+```
 
 ## Quick Start
 먼저 `korre` 패키지를 다음과 같이 import 합니다.
